@@ -1796,3 +1796,527 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 urlencoding = "2"
 ```
+
+## 15. Design Review — 已识别问题与修正
+
+### 15.1 问题 1：WASM FFI 太底层，Plugin 开发体验差
+
+**现状**：Plugin 通过 `extern "C"` + 裸指针 (`*const u8`, `u32` len) 与宿主通信。开发者要手写 unsafe 代码处理内存布局。
+
+**问题**：
+- 容易写出内存安全 bug（越界、悬垂指针）
+- 开发门槛高，社区贡献者不愿意写
+- 每个 Plugin 重复大量样板代码
+
+**修正**：使用 **WASM Component Model + wit-bindgen** 替代裸 FFI。
+
+```wit
+// shopclaw.wit — 定义宿主与插件的类型安全接口
+
+package shopclaw:plugin@0.1.0;
+
+interface browser {
+    record tab {
+        id: u64,
+        url: string,
+        title: string,
+    }
+
+    open-tab: func(url: string) -> result<tab, string>;
+    close-tab: func(tab-id: u64);
+    navigate: func(tab-id: u64, url: string) -> result<_, string>;
+    wait-for-selector: func(tab-id: u64, selector: string, timeout-ms: u32) -> bool;
+    query-text: func(tab-id: u64, selector: string) -> result<string, string>;
+    click: func(tab-id: u64, selector: string) -> result<_, string>;
+    type-text: func(tab-id: u64, selector: string, text: string) -> result<_, string>;
+    get-url: func(tab-id: u64) -> result<string, string>;
+    screenshot: func(tab-id: u64) -> result<list<u8>, string>;
+    evaluate: func(tab-id: u64, expression: string) -> result<string, string>;
+}
+
+interface selectors {
+    /// 宿主侧加载选择器（不是 Plugin 内 include_str!）
+    get: func(name: string) -> option<string>;
+    get-or-llm-fallback: func(name: string, description: string) -> result<string, string>;
+}
+
+world plugin {
+    import browser;
+    import selectors;
+
+    export init: func() -> string;          // 返回 manifest JSON
+    export invoke: func(tool: string, params: string) -> string;  // 返回 result JSON
+}
+```
+
+**改后 Plugin 代码**（无 unsafe）：
+
+```rust
+// crates/shopclaw-plugin-amazon/src/search.rs (使用 wit-bindgen)
+
+use crate::bindings::browser;
+use crate::bindings::selectors;
+
+pub fn execute(params: serde_json::Value) -> Result<serde_json::Value, String> {
+    let query = params["query"].as_str().ok_or("missing 'query'")?;
+    let url = format!("https://www.amazon.com/s?k={}", urlencoding::encode(query));
+
+    // 类型安全，无 unsafe
+    let tab = browser::open_tab(&url)?;
+    let sel = selectors::get_or_llm_fallback(
+        "search_result_item",
+        "Each product card in Amazon search results"
+    )?;
+
+    if !browser::wait_for_selector(tab.id, &sel, 10_000) {
+        browser::close_tab(tab.id);
+        return Err("search results did not load".into());
+    }
+
+    let title = browser::query_text(tab.id,
+        &selectors::get_or_llm_fallback("result_title", "Product title in search result")?
+    )?;
+
+    browser::close_tab(tab.id);
+    // ...
+    Ok(serde_json::json!({"title": title}))
+}
+```
+
+### 15.2 问题 2：WASM 内异步操作无法工作
+
+**现状**：Browser Bridge 是 `async fn`，但 WASM 不原生支持 async。Plugin 调 `host_open_tab()` 时，宿主需要做异步网络操作（WebSocket → Chrome 扩展 → CDP），但 WASM 调用是同步阻塞的。
+
+**修正**：宿主在 host import 实现中使用 `block_on` 桥接。Wasmtime 的 host function 可以通过 `tokio::runtime::Handle::current().block_on()` 同步等待异步操作完成。Plugin 侧无需关心——它调用的是同步 API，阻塞等待结果返回。
+
+```rust
+// 宿主侧 host function 实现
+linker.func_wrap("browser", "open-tab", |mut caller: Caller<'_, HostState>, url: &str| -> Result<Tab> {
+    let browser = caller.data().browser.clone();
+    let handle = tokio::runtime::Handle::current();
+
+    // 同步阻塞等待异步操作完成
+    let tab = handle.block_on(async {
+        browser.open_tab(url).await
+    })?;
+
+    Ok(tab)
+})?;
+```
+
+这是有意的设计取舍：Plugin 执行是串行阻塞的（一个 Plugin 同时只有一个 tool 在执行），但多个 Plugin 之间可以并行（每个 Plugin 有独立的 WASM 实例和 Store）。
+
+### 15.3 问题 3：selectors.json 用 `include_str!` 编译进 WASM，更新需重编译
+
+**现状**：`const SELECTORS_JSON: &str = include_str!("../selectors.json");` 把选择器编译进 WASM binary。Amazon 改版 → 选择器失效 → 需要重新编译 Plugin WASM → 用户需要重新下载安装。
+
+**这是你提的热加载问题的根本原因。详见 §16 Selector 热更新系统。**
+
+### 15.4 问题 4：`sanitize_response` 按字段名黑名单过滤太脆弱
+
+**现状**：按 `"password"`, `"cookie"` 等字段名匹配然后删除。
+
+**问题**：
+- Plugin 可以用 `"passwd"`, `"pw"`, `"credentials"` 等变体名绕过
+- 合法字段如 `"email"` 在某些场景（如订单确认）是需要的
+
+**修正**：Plugin 通过 WIT 接口返回**强类型结构**（`Product`, `SearchResult`, `CartSummary`），而不是任意 JSON。宿主只序列化白名单类型中的字段，Plugin 无法返回任意数据。
+
+```wit
+// 在 shopclaw.wit 中定义返回类型
+record product {
+    title: string,
+    price: f64,
+    currency: string,
+    url: string,
+    rating: option<f32>,
+    availability: string,
+}
+
+record search-result {
+    query: string,
+    products: list<product>,
+    has-next-page: bool,
+}
+
+// Plugin 必须返回这些类型，无法塞入任意字段
+```
+
+### 15.5 问题 5：Plugin SDK 的 `crate-type = ["cdylib"]` 标注位置错误
+
+**现状**：`shopclaw-plugin-sdk/Cargo.toml` 标注了 `crate-type = ["cdylib"]`。
+
+**问题**：SDK 是一个库（被 Plugin 引用），不应该自己编译为 cdylib。应该是**各个 Plugin crate** 标注 `crate-type = ["cdylib"]`。
+
+**修正**：
+```toml
+# crates/shopclaw-plugin-sdk/Cargo.toml
+[lib]
+crate-type = ["rlib"]  # 普通 Rust 库，被 Plugin 依赖
+
+# crates/shopclaw-plugin-amazon/Cargo.toml
+[lib]
+crate-type = ["cdylib"]  # 编译为 .wasm
+[dependencies]
+shopclaw-plugin-sdk = { path = "../shopclaw-plugin-sdk" }
+```
+
+---
+
+## 16. Selector 热更新系统
+
+### 16.1 设计目标
+
+购物网站经常改版（Amazon 平均每 2-4 周调整一次前端结构）。Selector 失效后，用户不应该需要重新安装 ShopClaw 或更新 Plugin。
+
+**目标**：
+1. Selector 与 Plugin WASM 解耦——WASM 管逻辑，Selector 在宿主侧独立管理
+2. 自动检测 Selector 失效
+3. 自动从远程拉取最新 Selector
+4. LLM 兜底发现新 Selector 并回报社区
+
+### 16.2 三层 Selector 解析
+
+```
+Plugin 请求 selector "search_result_item"
+  │
+  ▼
+┌──────────────────────────────────────────────────────┐
+│  宿主 SelectorResolver                                │
+│                                                      │
+│  Layer 1: 本地缓存                                    │
+│  ~/.shopclaw/selectors/{plugin}/selectors_cache.json  │
+│  ├─ 命中 → 返回                                      │
+│  └─ 未命中 ↓                                          │
+│                                                      │
+│  Layer 2: 远程 Selector Registry                      │
+│  GET https://registry.shopclaw.dev/v1/selectors/     │
+│      {plugin}/{selector_name}                        │
+│  ├─ 命中 → 写入 Layer 1 缓存 → 返回                   │
+│  └─ 未命中 ↓                                          │
+│                                                      │
+│  Layer 3: LLM 实时发现                                │
+│  截图 + HTML → LLM → 推断 CSS selector                │
+│  ├─ 成功 → 写入 Layer 1 缓存 → 可选上报 Registry → 返回│
+│  └─ 失败 → 返回 Err，Plugin 通知 Agent 需要人工介入    │
+└──────────────────────────────────────────────────────┘
+```
+
+### 16.3 Selector Registry（远程选择器仓库）
+
+Selector Registry 是一个轻量级 HTTP 服务，托管社区维护的最新选择器：
+
+```
+https://registry.shopclaw.dev/
+  └── v1/
+      └── selectors/
+          ├── amazon/
+          │   ├── manifest.json          # 版本号 + 最后更新时间
+          │   └── selectors.json         # 所有 Amazon 选择器
+          ├── jd/
+          │   ├── manifest.json
+          │   └── selectors.json
+          └── taobao/
+              ├── manifest.json
+              └── selectors.json
+```
+
+**实际上不需要自建服务器**——直接用 **GitHub Raw**：
+
+```
+https://raw.githubusercontent.com/tokligence/shopclaw-selectors/main/amazon/selectors.json
+```
+
+社区通过 PR 更新选择器，merge 后所有用户自动获取最新版本。
+
+### 16.4 自动检测 Selector 失效
+
+```rust
+// crates/shopclaw-core/src/selector/health.rs
+
+/// Selector 健康检查策略
+pub struct SelectorHealthChecker;
+
+impl SelectorHealthChecker {
+    /// 在每次 Plugin 调用 `get_or_llm_fallback` 时，宿主先用 selector 探测页面。
+    /// 如果 selector 匹配到 0 个元素 → 标记为 stale。
+    pub async fn check(
+        &self,
+        browser: &dyn BrowserBridge,
+        tab_id: &str,
+        selector: &str,
+    ) -> SelectorHealth {
+        match browser.query_selector_all(tab_id, selector).await {
+            Ok(elements) if elements.is_empty() => SelectorHealth::Stale,
+            Ok(_) => SelectorHealth::Healthy,
+            Err(_) => SelectorHealth::Stale,
+        }
+    }
+}
+
+pub enum SelectorHealth {
+    Healthy,
+    Stale,   // selector 可能过期，触发更新
+}
+```
+
+**完整流程**：
+
+```
+Plugin 调用 selectors::get("search_result_item")
+  │
+  ▼
+宿主从 Layer 1 缓存拿到 selector
+  │
+  ▼
+宿主用 selector 在当前页面探测 → 匹配到元素？
+  ├─ Yes → 返回 selector（健康）
+  └─ No  → selector 可能过期
+            │
+            ▼
+         从 Registry 拉取最新 selector
+            │
+            ├─ 新 selector ≠ 旧 selector → 用新的探测
+            │    ├─ 匹配成功 → 更新缓存，返回新 selector
+            │    └─ 匹配失败 → 降级 LLM
+            │
+            └─ Registry 无更新 / 网络不可达 → 降级 LLM
+                  │
+                  ▼
+               LLM 截图分析
+                  ├─ 发现新 selector → 缓存 + 可选上报 → 返回
+                  └─ 失败 → 返回错误
+```
+
+### 16.5 后台增量同步
+
+不需要每次调用都查 Registry。ShopClaw 启动时和运行中定期后台同步：
+
+```rust
+// crates/shopclaw-core/src/selector/sync.rs
+
+use std::time::Duration;
+
+pub struct SelectorSyncService {
+    registry_base_url: String,
+    cache_dir: PathBuf,
+    sync_interval: Duration,
+}
+
+impl SelectorSyncService {
+    /// 启动后台同步任务
+    pub fn spawn(self) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                for plugin in &["amazon", "jd", "taobao"] {
+                    if let Err(e) = self.sync_plugin(plugin).await {
+                        tracing::warn!("selector sync failed for {}: {}", plugin, e);
+                    }
+                }
+                tokio::time::sleep(self.sync_interval).await;
+            }
+        })
+    }
+
+    async fn sync_plugin(&self, plugin: &str) -> Result<()> {
+        // 1. 获取远程 manifest（版本号 + etag）
+        let url = format!("{}/{}/manifest.json", self.registry_base_url, plugin);
+        let remote_manifest: SelectorManifest = reqwest::get(&url).await?.json().await?;
+
+        // 2. 比较本地版本
+        let local_manifest = self.load_local_manifest(plugin)?;
+        if local_manifest.version >= remote_manifest.version {
+            return Ok(()); // 已是最新
+        }
+
+        // 3. 下载新 selectors.json
+        let selectors_url = format!("{}/{}/selectors.json", self.registry_base_url, plugin);
+        let new_selectors = reqwest::get(&selectors_url).await?.text().await?;
+
+        // 4. 写入本地缓存
+        let cache_path = self.cache_dir.join(plugin).join("selectors.json");
+        tokio::fs::create_dir_all(cache_path.parent().unwrap()).await?;
+        tokio::fs::write(&cache_path, &new_selectors).await?;
+
+        // 5. 更新本地 manifest
+        let manifest_path = self.cache_dir.join(plugin).join("manifest.json");
+        tokio::fs::write(&manifest_path, serde_json::to_string(&remote_manifest)?).await?;
+
+        tracing::info!(
+            "updated selectors for {} : v{} → v{}",
+            plugin, local_manifest.version, remote_manifest.version
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SelectorManifest {
+    version: u32,
+    updated_at: String,  // ISO 8601
+    plugin: String,
+    selector_count: usize,
+}
+```
+
+### 16.6 LLM 发现的 Selector 回报社区（可选）
+
+用户可以 opt-in 把 LLM 发现的新 selector 自动提交给社区：
+
+```toml
+# ~/.shopclaw/config.toml
+
+[selector_sync]
+# 从 GitHub raw 拉取最新选择器
+registry_url = "https://raw.githubusercontent.com/tokligence/shopclaw-selectors/main"
+# 同步间隔
+sync_interval = "6h"
+# 是否把 LLM 发现的新 selector 回报社区（需要 GitHub token）
+contribute_discoveries = true
+# GitHub token（仅用于创建 PR，可选）
+github_token_env = "GITHUB_TOKEN"
+```
+
+**回报流程**：
+
+```
+LLM 发现新 selector
+  │
+  ▼
+本地验证：在当前页面用新 selector 能匹配到正确元素？
+  ├─ No → 只存本地缓存，不上报
+  └─ Yes ↓
+        │
+        ▼
+    contribute_discoveries = true?
+      ├─ No → 只存本地缓存
+      └─ Yes ↓
+            │
+            ▼
+        自动 fork shopclaw-selectors repo
+        更新 {plugin}/selectors.json
+        创建 PR：
+          "Auto-discovered selector: {plugin}/{name}"
+          Body: "Discovered by LLM on {date}, verified on {url}"
+        │
+        ▼
+    社区 maintainer review + merge
+        │
+        ▼
+    所有用户在下次同步时自动获取
+```
+
+### 16.7 完整数据流
+
+```
+                         ┌─────────────────────────┐
+                         │  GitHub Repo             │
+                         │  shopclaw-selectors      │
+                         │  ├── amazon/             │
+                         │  │   └── selectors.json  │ ◄── 社区 PR 更新
+                         │  ├── jd/                 │
+                         │  └── taobao/             │
+                         └───────────┬──────────────┘
+                                     │ raw.githubusercontent.com
+                                     │ (每 6h 同步一次)
+                                     ▼
+┌────────────────────────────────────────────────────────────┐
+│  用户机器                                                    │
+│                                                            │
+│  ~/.shopclaw/selectors/              ShopClaw Core          │
+│  ├── amazon/                         ┌────────────────┐    │
+│  │   ├── selectors.json  ◄───────── │ SelectorSync   │    │
+│  │   ├── manifest.json               │ Service        │    │
+│  │   └── selectors_cache.json ◄──── │ (后台增量同步)  │    │
+│  ├── jd/                             └────────────────┘    │
+│  └── taobao/                                  ▲            │
+│                                               │            │
+│  Plugin (WASM) 请求 selector                   │            │
+│       │                                       │            │
+│       ▼                                       │            │
+│  SelectorResolver                             │            │
+│  ├─ Layer 1: 本地缓存 ─── hit ──► 返回       │            │
+│  ├─ Layer 2: 远程同步 ─── hit ──► 缓存+返回  │            │
+│  └─ Layer 3: LLM 发现 ─── hit ──► 缓存+返回  │            │
+│                     │                         │            │
+│                     └── opt-in 回报 ──────────┘            │
+└────────────────────────────────────────────────────────────┘
+```
+
+### 16.8 用户视角
+
+用户完全无感知。从用户角度看：
+
+| 场景 | 用户需要做什么 |
+|------|--------------|
+| Amazon 改版，选择器失效 | **什么都不用做**。ShopClaw 后台自动拉取最新选择器 |
+| 社区还没更新选择器 | **什么都不用做**。LLM 自动发现新选择器，本地缓存 |
+| LLM 也找不到 | ShopClaw 提示「Amazon 页面结构变化较大，请稍后重试」|
+| ShopClaw 本身有 bug fix | 需要更新 ShopClaw binary（`cargo install --force` 或包管理器）|
+
+**关键区分**：
+- **Selector 更新** = 不需要重装软件，自动同步
+- **Plugin 逻辑更新**（如 Amazon 改了 checkout 流程）= 需要更新 Plugin WASM，但也可以热加载（放入 `~/.shopclaw/plugins/` 目录即可，无需重启）
+- **Core 更新** = 需要重装 ShopClaw binary
+
+### 16.9 Plugin WASM 热加载
+
+Plugin WASM 文件也支持热加载——无需重启 ShopClaw：
+
+```rust
+// crates/shopclaw-core/src/plugin/registry.rs
+
+pub struct PluginRegistry {
+    plugin_dir: PathBuf,       // ~/.shopclaw/plugins/
+    plugins: RwLock<HashMap<String, Arc<PluginSandbox>>>,
+    watcher: notify::RecommendedWatcher,
+}
+
+impl PluginRegistry {
+    /// 监听 plugin_dir，有新 .wasm 文件或文件变化时自动加载/重载
+    pub fn watch(&mut self) -> Result<()> {
+        use notify::{Watcher, RecursiveMode};
+
+        let plugins = self.plugins.clone();
+        let browser = self.browser.clone();
+
+        self.watcher.watch(&self.plugin_dir, RecursiveMode::NonRecursive)?;
+
+        // 文件变化回调
+        // - 新增 .wasm → 加载并注册
+        // - 修改 .wasm → 卸载旧的，加载新的
+        // - 删除 .wasm → 卸载
+        Ok(())
+    }
+}
+```
+
+用户可以直接把新的 `.wasm` 文件丢进 `~/.shopclaw/plugins/`，ShopClaw 自动检测并加载，无需重启。
+
+### 16.10 配置总览
+
+```toml
+# ~/.shopclaw/config.toml
+
+[selector_sync]
+# Selector 远程仓库 URL（默认 GitHub raw）
+registry_url = "https://raw.githubusercontent.com/tokligence/shopclaw-selectors/main"
+# 同步间隔（启动时立即同步一次，之后按间隔）
+sync_interval = "6h"
+# 是否启用后台同步（禁用则仅用本地 + LLM）
+enabled = true
+# 回报 LLM 发现的新 selector 给社区
+contribute_discoveries = false
+
+[llm]
+# LLM 用于 selector 发现的兜底
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[plugins]
+# Plugin 目录，支持热加载
+plugin_dir = "~/.shopclaw/plugins"
+# 是否自动检查 Plugin 更新（从 GitHub releases）
+auto_update_plugins = true
+```
