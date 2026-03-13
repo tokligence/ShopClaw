@@ -12,7 +12,461 @@ ShopClaw is a **local-first AI shopping assistant** that exposes shopping site o
 - No automatic payment; sensitive operations require user confirmation
 - Plugin sandboxing via WebAssembly (Wasmtime)
 
-## 2. Workspace Layout
+## 2. Architecture Diagrams
+
+### 2.1 全局架构总览
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                                                                      │
+│   用户："帮我比较一下 Amazon 和京东上 AirPods 的价格"                    │
+│                                                                      │
+│   ┌───────────────────────────────────────────────────────────┐      │
+│   │  AI Agent (OpenClaw / Claude Code / Cursor)               │      │
+│   │                                                           │      │
+│   │  Agent 理解意图 → 决定调用 amazon_search + jd_search      │      │
+│   └──────────────────────┬────────────────────────────────────┘      │
+│                          │                                           │
+│                          │ stdio (JSON-RPC 2.0)                      │
+│                          │ MCP 协议                                   │
+│                          ▼                                           │
+│   ┌───────────────────────────────────────────────────────────┐      │
+│   │  ShopClaw (Rust binary)                                   │      │
+│   │                                                           │      │
+│   │  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌────────────┐ │      │
+│   │  │   MCP   │  │ Plugin  │  │Selector │  │  Browser   │ │      │
+│   │  │ Server  │→ │ Router  │→ │Resolver │→ │  Bridge    │ │      │
+│   │  └─────────┘  └────┬────┘  └─────────┘  └──────┬─────┘ │      │
+│   │                     │                            │       │      │
+│   │              ┌──────┴──────┐                     │       │      │
+│   │              ▼             ▼                     │       │      │
+│   │        ┌──────────┐ ┌──────────┐                │       │      │
+│   │        │  Amazon  │ │    JD    │  (WASM 沙箱)   │       │      │
+│   │        │  Plugin  │ │  Plugin  │                │       │      │
+│   │        └──────────┘ └──────────┘                │       │      │
+│   └──────────────────────────────────────────────────┼───────┘      │
+│                                                      │              │
+│                                   WebSocket 127.0.0.1│              │
+│                                                      ▼              │
+│   ┌───────────────────────────────────────────────────────────┐     │
+│   │  用户日常 Chrome                                           │     │
+│   │                                                           │     │
+│   │  ┌────────────────┐                                       │     │
+│   │  │ ShopClaw 扩展   │  chrome.debugger API                  │     │
+│   │  └───────┬────────┘                                       │     │
+│   │          │                                                │     │
+│   │  ┌──────┴──────┐ ┌────────────┐ ┌────────────┐          │     │
+│   │  │ Amazon Tab  │ │  JD Tab    │ │ Gmail Tab  │          │     │
+│   │  │ (操作中)    │ │  (操作中)   │ │ (不受影响) │          │     │
+│   │  └─────────────┘ └────────────┘ └────────────┘          │     │
+│   └───────────────────────────────────────────────────────────┘     │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### 2.2 一次 Tool 调用的完整路径
+
+以 `amazon_search("AirPods")` 为例：
+
+```
+Agent                ShopClaw Core              Plugin (WASM)         Chrome 扩展          Amazon Tab
+  │                      │                          │                     │                   │
+  │ tools/call           │                          │                     │                   │
+  │ "amazon_search"      │                          │                     │                   │
+  │─────────────────────▶│                          │                     │                   │
+  │                      │                          │                     │                   │
+  │                      │ ① Confirmation Gate      │                     │                   │
+  │                      │   risk=read → 放行       │                     │                   │
+  │                      │                          │                     │                   │
+  │                      │ ② Rate Limiter           │                     │                   │
+  │                      │   search: 3/10 → 放行    │                     │                   │
+  │                      │                          │                     │                   │
+  │                      │ ③ invoke WASM            │                     │                   │
+  │                      │─────────────────────────▶│                     │                   │
+  │                      │                          │                     │                   │
+  │                      │                          │ ④ selectors::get    │                   │
+  │                      │      Selector Resolver ◀─│  ("search_result") │                   │
+  │                      │      本地缓存命中 ──────▶│  → "[data-comp..]" │                   │
+  │                      │                          │                     │                   │
+  │                      │                          │ ⑤ browser::open_tab│                   │
+  │                      │   Browser Bridge ◀───────│  (amazon.com/s?k=) │                   │
+  │                      │                          │                     │                   │
+  │                      │          WebSocket CDP ──┼─────────────────────▶ navigate          │
+  │                      │                          │                     │──────────────────▶│
+  │                      │                          │                     │   页面加载完成     │
+  │                      │                          │                     │◀──────────────────│
+  │                      │   tab_id ───────────────▶│                     │                   │
+  │                      │                          │                     │                   │
+  │                      │                          │ ⑥ browser::query_  │                   │
+  │                      │   Browser Bridge ◀───────│   text(selector)   │                   │
+  │                      │          CDP ────────────┼─────────────────────▶ DOM query         │
+  │                      │                          │                     │◀─ "AirPods Pro.." │
+  │                      │   text ─────────────────▶│                     │                   │
+  │                      │                          │                     │                   │
+  │                      │                          │ ⑦ 组装 SearchResult│                   │
+  │                      │◀─────────────────────────│   返回 JSON        │                   │
+  │                      │                          │                     │                   │
+  │                      │ ⑧ Data Sanitize          │                     │                   │
+  │                      │   (强类型，无敏感字段)     │                     │                   │
+  │                      │                          │                     │                   │
+  │                      │ ⑨ Audit Log              │                     │                   │
+  │                      │   写入 audit.log          │                     │                   │
+  │                      │                          │                     │                   │
+  │ ⑩ 返回结果           │                          │                     │                   │
+  │◀─────────────────────│                          │                     │                   │
+  │  [{title: "AirPods   │                          │                     │                   │
+  │    Pro", price: 249}]│                          │                     │                   │
+```
+
+### 2.3 Core 内部模块关系
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  shopclaw-core                                              │
+│                                                             │
+│  ┌──────────────────────────────────────────────────────┐  │
+│  │  main.rs (CLI)                                       │  │
+│  │  shopclaw serve | setup | plugins | audit            │  │
+│  └──────────────────────┬───────────────────────────────┘  │
+│                         │                                   │
+│  ┌──────────────────────▼───────────────────────────────┐  │
+│  │  mcp/server.rs                                       │  │
+│  │  stdio JSON-RPC 2.0 event loop                       │  │
+│  │  ├── initialize → 返回 capabilities                  │  │
+│  │  ├── tools/list → 汇总所有 Plugin 的 tools            │  │
+│  │  └── tools/call → 转发给 Router                      │  │
+│  └──────────────────────┬───────────────────────────────┘  │
+│                         │                                   │
+│  ┌──────────────────────▼───────────────────────────────┐  │
+│  │  mcp/router.rs                                       │  │
+│  │  ┌──────┐   ┌───────┐   ┌────────┐   ┌──────────┐  │  │
+│  │  │ Gate │ → │Limiter│ → │ Plugin │ → │Sanitize  │  │  │
+│  │  │ 风控 │   │ 限流  │   │ invoke │   │ + Audit  │  │  │
+│  │  └──────┘   └───────┘   └────┬───┘   └──────────┘  │  │
+│  └──────────────────────────────┼───────────────────────┘  │
+│                                 │                           │
+│  ┌──────────────────────────────▼───────────────────────┐  │
+│  │  plugin/                                             │  │
+│  │  ┌────────────┐  ┌─────────────┐  ┌──────────────┐ │  │
+│  │  │ registry   │  │  sandbox    │  │  manifest    │ │  │
+│  │  │ 热加载管理  │  │  Wasmtime   │  │  解析        │ │  │
+│  │  │ 文件监听    │  │  WIT接口    │  │              │ │  │
+│  │  └────────────┘  └─────────────┘  └──────────────┘ │  │
+│  └──────────────────────────────────────────────────────┘  │
+│                                                             │
+│  ┌──────────────────────┐  ┌────────────────────────────┐  │
+│  │  selector/            │  │  browser/                  │  │
+│  │  ┌────────────────┐  │  │  ┌──────────────────────┐  │  │
+│  │  │ resolver       │  │  │  │ relay.rs             │  │  │
+│  │  │ 三层解析       │  │  │  │ WebSocket → 扩展     │  │  │
+│  │  │ 缓存/远程/LLM │  │  │  └──────────────────────┘  │  │
+│  │  ├────────────────┤  │  │  ┌──────────────────────┐  │  │
+│  │  │ sync.rs        │  │  │  │ cdp.rs               │  │  │
+│  │  │ 后台增量同步    │  │  │  │ CDP 命令构建          │  │  │
+│  │  ├────────────────┤  │  │  └──────────────────────┘  │  │
+│  │  │ health.rs      │  │  │  ┌──────────────────────┐  │  │
+│  │  │ 选择器健康检查  │  │  │  │ tab.rs               │  │  │
+│  │  └────────────────┘  │  │  │ Tab 生命周期管理       │  │  │
+│  └──────────────────────┘  │  └──────────────────────┘  │  │
+│                             └────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 2.4 Selector 三层解析流程
+
+```
+Plugin 请求: selectors::get("search_result_item")
+  │
+  ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Layer 1: 本地缓存                                          │
+│  ~/.shopclaw/selectors/amazon/selectors.json                │
+│                                                             │
+│  查找 "search_result_item" ──► 找到                         │
+│  │                                                          │
+│  ▼                                                          │
+│  在当前页面验证 selector → 能匹配到元素？                     │
+│  ├── Yes ──► 返回 ✓                                        │
+│  └── No ───► selector 过期，降级 ↓                          │
+└─────────────────────────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Layer 2: 从 Repo 拉取最新                                   │
+│                                                             │
+│  GET raw.githubusercontent.com/tokligence/ShopClaw/         │
+│      main/registry/amazon/selectors.json                    │
+│                                                             │
+│  ├── 有新版本 → 更新本地缓存 → 验证 → 匹配？               │
+│  │   ├── Yes ──► 返回 ✓                                    │
+│  │   └── No ───► 降级 ↓                                    │
+│  │                                                          │
+│  └── 网络不可达 / 无更新 ──► 降级 ↓                          │
+└─────────────────────────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Layer 3: LLM 实时发现                                       │
+│                                                             │
+│  截图当前页面 + 获取 HTML                                    │
+│       │                                                     │
+│       ▼                                                     │
+│  发送给 LLM:                                                │
+│  "在 amazon.com 搜索结果页找 '每个商品卡片' 的 CSS selector" │
+│       │                                                     │
+│       ▼                                                     │
+│  LLM 返回: "[data-component-type='s-search-result']"        │
+│       │                                                     │
+│       ▼                                                     │
+│  在页面验证 → 匹配？                                         │
+│  ├── Yes ──► 写入 Layer 1 缓存 ──► 返回 ✓                  │
+│  │           可选: 回报社区 (PR)                              │
+│  └── No  ──► 返回错误，通知 Agent 需要人工介入               │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 2.5 Repo 内 Registry 结构与同步
+
+```
+GitHub Repo: tokligence/ShopClaw
+│
+├── crates/                    # Rust 源码
+├── extension/                 # Chrome 扩展源码
+├── DESIGN.md
+│
+└── registry/                  # ◄── Selector + Plugin 更新源
+    ├── manifest.json          # 全局版本清单
+    ├── amazon/
+    │   ├── selectors.json     # Amazon 最新选择器
+    │   ├── meta.json          # 版本、更新时间、兼容的 Plugin 版本
+    │   └── plugin.wasm        # (可选) 预编译 Plugin binary
+    ├── jd/
+    │   ├── selectors.json
+    │   ├── meta.json
+    │   └── plugin.wasm
+    └── taobao/
+        ├── selectors.json
+        ├── meta.json
+        └── plugin.wasm
+
+
+同步数据流:
+
+┌────────────────────────────────┐
+│  GitHub Repo                   │
+│  registry/                     │
+│  ├── manifest.json             │
+│  ├── amazon/selectors.json     │ ◄── 社区 PR / 维护者更新
+│  ├── jd/selectors.json         │
+│  └── taobao/selectors.json     │
+└───────────────┬────────────────┘
+                │
+                │ raw.githubusercontent.com
+                │ (每 6h 检查一次)
+                ▼
+┌────────────────────────────────────────────────────────────┐
+│  用户机器上的 ShopClaw                                       │
+│                                                            │
+│  ┌─────────────────────┐     ┌──────────────────────────┐ │
+│  │ SelectorSyncService │     │ PluginUpdateChecker      │ │
+│  │                     │     │                          │ │
+│  │ ① 拉 manifest.json │     │ ① 拉 manifest.json      │ │
+│  │ ② 比较版本号        │     │ ② 检查有无新 plugin.wasm │ │
+│  │ ③ 有更新就下载      │     │ ③ 有更新就下载到         │ │
+│  │   selectors.json    │     │   ~/.shopclaw/plugins/   │ │
+│  │ ④ 写入本地缓存      │     │ ④ 文件监听器自动热加载   │ │
+│  └─────────────────────┘     └──────────────────────────┘ │
+│            │                              │                │
+│            ▼                              ▼                │
+│  ~/.shopclaw/                  ~/.shopclaw/plugins/        │
+│  selectors/                    ├── amazon.wasm             │
+│  ├── amazon/selectors.json     ├── jd.wasm                │
+│  ├── jd/selectors.json         └── taobao.wasm            │
+│  └── taobao/selectors.json                                │
+└────────────────────────────────────────────────────────────┘
+```
+
+### 2.6 Plugin WASM 沙箱隔离
+
+```
+┌──────────────────────────────────────────────────────┐
+│  ShopClaw 进程                                        │
+│                                                      │
+│  ┌────────────────────────────────────────────────┐  │
+│  │  Wasmtime Runtime                              │  │
+│  │                                                │  │
+│  │  ┌──────────────┐   ┌──────────────┐          │  │
+│  │  │ Amazon WASM  │   │   JD WASM    │  ...     │  │
+│  │  │              │   │              │          │  │
+│  │  │ 独立内存空间  │   │ 独立内存空间  │          │  │
+│  │  │ 无文件系统    │   │ 无文件系统    │          │  │
+│  │  │ 无网络访问    │   │ 无网络访问    │          │  │
+│  │  │ 无法读其他    │   │ 无法读其他    │          │  │
+│  │  │ Plugin 数据   │   │ Plugin 数据   │          │  │
+│  │  │              │   │              │          │  │
+│  │  │ 只能调用:     │   │ 只能调用:     │          │  │
+│  │  │ · browser::* │   │ · browser::* │          │  │
+│  │  │ · selectors::│   │ · selectors::│          │  │
+│  │  └──────┬───────┘   └──────┬───────┘          │  │
+│  │         │ WIT 接口         │ WIT 接口          │  │
+│  └─────────┼──────────────────┼───────────────────┘  │
+│            │                  │                       │
+│            ▼                  ▼                       │
+│  ┌────────────────────────────────────────────────┐  │
+│  │  Host API (Rust native)                        │  │
+│  │  Browser Bridge / Selector Resolver / Gate     │  │
+│  └────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────┘
+
+Plugin 能做的:                     Plugin 不能做的:
+ ✓ 打开/关闭 Tab                    ✗ 读写文件系统
+ ✓ 点击/输入/读取 DOM               ✗ 发起网络请求
+ ✓ 请求选择器                       ✗ 访问其他 Plugin 数据
+ ✓ 截图 (用于 LLM)                  ✗ 执行系统命令
+                                    ✗ 访问用户凭据/Cookie
+```
+
+### 2.7 Chrome 扩展交互
+
+```
+ShopClaw Core                    Chrome Extension                User Chrome
+     │                                │                              │
+     │ ① 读 ~/.shopclaw/relay-token   │                              │
+     │    读 ~/.shopclaw/relay-port    │                              │
+     │                                │                              │
+     │ ② ws://127.0.0.1:PORT         │                              │
+     │    + token                     │                              │
+     │───────────────────────────────▶│                              │
+     │                                │ ③ 验证 token                 │
+     │                                │                              │
+     │                                │ ④ 弹窗确认 ─────────────────▶│
+     │                                │   "ShopClaw 请求连接"        │ 用户点「允许」
+     │                                │◀─────────────────────────────│
+     │                                │                              │
+     │◀── 信任会话建立 ───────────────│                              │
+     │    (无超时，断开即失效)          │                              │
+     │                                │                              │
+     │ ⑤ CDP: Target.createTarget    │                              │
+     │   url: "amazon.com/s?k=..."    │                              │
+     │───────────────────────────────▶│                              │
+     │                                │ chrome.debugger              │
+     │                                │   .attach(tabId)             │
+     │                                │──────────────────────────────▶ 新 Tab 打开
+     │                                │                              │
+     │◀── tabId ──────────────────────│                              │
+     │                                │                              │
+     │ ⑥ CDP: DOM.querySelector      │                              │
+     │   selector: "[data-comp...]"   │                              │
+     │───────────────────────────────▶│                              │
+     │                                │ chrome.debugger              │
+     │                                │   .sendCommand(              │
+     │                                │     tabId,                   │
+     │                                │     "DOM.querySelector",     │
+     │                                │     {selector: "..."}        │
+     │                                │   )                          │
+     │                                │──────────────────────────────▶ DOM 查询
+     │                                │◀───── nodeId ────────────────│
+     │◀── nodeId ─────────────────────│                              │
+     │                                │                              │
+     │ ... 更多操作 ...               │  扩展状态栏:                  │
+     │                                │  "🟢 ShopClaw 操作中:       │
+     │                                │   amazon.com"                │
+     │                                │                              │
+     │ ⑦ 断开                        │                              │
+     │───────────────────────────────▶│                              │
+     │                                │  扩展状态栏:                  │
+     │                                │  "⚪ 未连接"                 │
+```
+
+### 2.8 跨站比价完整流程
+
+```
+用户: "比较 Amazon 和京东上 AirPods 的价格"
+  │
+  ▼
+Agent 规划: 需要并行调用两个 search tool
+  │
+  ├─────────────────────────┐
+  │                         │
+  ▼                         ▼
+amazon_search("AirPods")   jd_search("AirPods")
+  │                         │
+  ▼                         ▼
+ShopClaw Router            ShopClaw Router
+  │                         │
+  ▼                         ▼
+Amazon Plugin (WASM)       JD Plugin (WASM)
+  │                         │
+  ▼                         ▼
+打开 Amazon Tab            打开 JD Tab
+提取商品数据               提取商品数据
+关闭 Tab                   关闭 Tab
+  │                         │
+  ▼                         ▼
+返回 SearchResult          返回 SearchResult
+  │                         │
+  └───────────┬─────────────┘
+              │
+              ▼
+Agent 整合结果:
+
+  "我找到了以下对比:
+
+   | 商品         | Amazon    | 京东      |
+   |-------------|-----------|-----------|
+   | AirPods Pro | $249.00   | ¥1,799    |
+   | AirPods 3   | $169.00   | ¥1,279    |
+
+   Amazon 更便宜。要加入购物车吗？"
+```
+
+### 2.9 Selector 过期 → 自动恢复流程
+
+```
+用户: "搜索 Amazon 上的充电器"
+  │
+  ▼
+Plugin 调用 selectors::get("search_result_item")
+  │
+  ▼
+本地缓存返回: "[data-component-type='s-search-result']"
+  │
+  ▼
+Browser Bridge 在页面上查找 → 匹配 0 个元素 ❌
+  │
+  ▼  (Amazon 上周改版了!)
+  │
+  ▼
+ShopClaw 自动触发 Layer 2:
+从 Repo 拉取最新 selectors.json
+  │
+  ├─ 有更新! 新 selector: ".s-result-item[data-asin]"
+  │  在页面验证 → 匹配到 20 个元素 ✓
+  │  更新本地缓存
+  │  │
+  │  ▼
+  │  正常返回搜索结果给用户
+  │  (用户完全无感知)
+  │
+  └─ 没更新 (社区还没来得及修)
+     │
+     ▼
+     ShopClaw 自动触发 Layer 3:
+     截图 + HTML → LLM
+     │
+     ▼
+     LLM: "新的 selector 是 .s-main-slot .s-result-item"
+     │
+     ▼
+     验证 → 匹配成功 ✓
+     写入本地缓存
+     │
+     ▼
+     正常返回搜索结果给用户
+     (用户完全无感知)
+```
+
+## 3. Workspace Layout
 
 ```
 ShopClaw/
@@ -88,6 +542,21 @@ ShopClaw/
 │   │   └── content.ts           # (minimal) page-level hooks if needed
 │   ├── package.json
 │   └── tsconfig.json
+│
+├── registry/                     # Selector + Plugin 更新源 (in-repo)
+│   ├── manifest.json             # 全局版本清单
+│   ├── amazon/
+│   │   ├── selectors.json        # 最新 Amazon 选择器
+│   │   ├── meta.json             # 版本号、更新时间
+│   │   └── plugin.wasm           # (可选) 预编译 Plugin
+│   ├── jd/
+│   │   ├── selectors.json
+│   │   ├── meta.json
+│   │   └── plugin.wasm
+│   └── taobao/
+│       ├── selectors.json
+│       ├── meta.json
+│       └── plugin.wasm
 │
 ├── tests/
 │   ├── integration/              # End-to-end tests with headless Chrome
@@ -1990,7 +2459,7 @@ Plugin 请求 selector "search_result_item"
 │  └─ 未命中 ↓                                          │
 │                                                      │
 │  Layer 2: 远程 Selector Registry                      │
-│  GET https://registry.shopclaw.dev/v1/selectors/     │
+│  GET https://raw.githubusercontent.com/tokligence/ShopClaw/main/registry/     │
 │      {plugin}/{selector_name}                        │
 │  ├─ 命中 → 写入 Layer 1 缓存 → 返回                   │
 │  └─ 未命中 ↓                                          │
@@ -2021,13 +2490,13 @@ https://registry.shopclaw.dev/
               └── selectors.json
 ```
 
-**实际上不需要自建服务器**——直接用 **GitHub Raw**：
+**不需要自建服务器**——直接用 ShopClaw Repo 的 `registry/` 文件夹，通过 GitHub Raw 访问：
 
 ```
-https://raw.githubusercontent.com/tokligence/shopclaw-selectors/main/amazon/selectors.json
+https://raw.githubusercontent.com/tokligence/ShopClaw/main/registry/amazon/selectors.json
 ```
 
-社区通过 PR 更新选择器，merge 后所有用户自动获取最新版本。
+代码和选择器在同一个 Repo 里，社区通过 PR 更新 `registry/` 目录下的 JSON，merge 后所有用户自动获取最新版本。
 
 ### 16.4 自动检测 Selector 失效
 
@@ -2168,7 +2637,7 @@ struct SelectorManifest {
 
 [selector_sync]
 # 从 GitHub raw 拉取最新选择器
-registry_url = "https://raw.githubusercontent.com/tokligence/shopclaw-selectors/main"
+registry_url = "https://raw.githubusercontent.com/tokligence/ShopClaw/main/registry"
 # 同步间隔
 sync_interval = "6h"
 # 是否把 LLM 发现的新 selector 回报社区（需要 GitHub token）
@@ -2193,8 +2662,8 @@ LLM 发现新 selector
       └─ Yes ↓
             │
             ▼
-        自动 fork shopclaw-selectors repo
-        更新 {plugin}/selectors.json
+        自动 fork tokligence/ShopClaw repo
+        更新 registry/{plugin}/selectors.json
         创建 PR：
           "Auto-discovered selector: {plugin}/{name}"
           Body: "Discovered by LLM on {date}, verified on {url}"
@@ -2211,7 +2680,8 @@ LLM 发现新 selector
 ```
                          ┌─────────────────────────┐
                          │  GitHub Repo             │
-                         │  shopclaw-selectors      │
+                         │  tokligence/ShopClaw     │
+                         │  registry/               │
                          │  ├── amazon/             │
                          │  │   └── selectors.json  │ ◄── 社区 PR 更新
                          │  ├── jd/                 │
@@ -2300,7 +2770,7 @@ impl PluginRegistry {
 
 [selector_sync]
 # Selector 远程仓库 URL（默认 GitHub raw）
-registry_url = "https://raw.githubusercontent.com/tokligence/shopclaw-selectors/main"
+registry_url = "https://raw.githubusercontent.com/tokligence/ShopClaw/main/registry"
 # 同步间隔（启动时立即同步一次，之后按间隔）
 sync_interval = "6h"
 # 是否启用后台同步（禁用则仅用本地 + LLM）

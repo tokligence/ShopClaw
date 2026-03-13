@@ -1,0 +1,8 @@
+{
+  "plugin": "taobao",
+  "selector_version": 1,
+  "updated_at": "2026-03-14T00:00:00Z",
+  "selector_count": 8,
+  "supported_regions": ["cn"],
+  "notes": "Initial selector set for Taobao search and product detail pages. Taobao uses heavily obfuscated class names that change frequently — LLM fallback may be needed more often."
+}

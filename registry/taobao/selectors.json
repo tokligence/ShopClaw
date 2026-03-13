@@ -1,0 +1,42 @@
+{
+  "search_result_item": {
+    "css": ".Content--contentInner--QVTcU0M .Card--doubleCardWrapper--L2XFE73",
+    "description": "Each product card in Taobao search results",
+    "last_verified": "2026-03-14"
+  },
+  "result_title": {
+    "css": ".Title--title--jCOPvpf span",
+    "description": "Product title in search result",
+    "last_verified": "2026-03-14"
+  },
+  "result_price": {
+    "css": ".Price--priceInt--ZlsSi_M",
+    "description": "Product price integer part",
+    "last_verified": "2026-03-14"
+  },
+  "result_url": {
+    "css": ".Card--doubleCardWrapper--L2XFE73 a",
+    "description": "Product detail page URL",
+    "last_verified": "2026-03-14"
+  },
+  "result_image": {
+    "css": ".MainPic--mainPic--rcLNaCl img",
+    "description": "Product thumbnail image",
+    "last_verified": "2026-03-14"
+  },
+  "add_to_cart_button": {
+    "css": "#J_LinkBasket",
+    "description": "Add to Cart button on product detail page",
+    "last_verified": "2026-03-14"
+  },
+  "product_title": {
+    "css": ".ItemHeader--mainTitle--3CIjqW",
+    "description": "Product title on detail page",
+    "last_verified": "2026-03-14"
+  },
+  "product_price": {
+    "css": ".Price--priceText--2nLbVda",
+    "description": "Product price on detail page",
+    "last_verified": "2026-03-14"
+  }
+}

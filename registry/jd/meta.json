@@ -1,0 +1,8 @@
+{
+  "plugin": "jd",
+  "selector_version": 1,
+  "updated_at": "2026-03-14T00:00:00Z",
+  "selector_count": 11,
+  "supported_regions": ["cn"],
+  "notes": "Initial selector set for JD.com search, product detail, and cart pages"
+}

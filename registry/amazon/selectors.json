@@ -1,0 +1,78 @@
+{
+  "search_result_item": {
+    "css": "[data-component-type='s-search-result']",
+    "description": "Each product card in search results",
+    "last_verified": "2026-03-14"
+  },
+  "result_title": {
+    "css": "h2 a span",
+    "description": "Product title text within a search result",
+    "last_verified": "2026-03-14"
+  },
+  "result_price": {
+    "css": ".a-price .a-offscreen",
+    "description": "Product price (screen-reader text for accurate parsing)",
+    "last_verified": "2026-03-14"
+  },
+  "result_rating": {
+    "css": ".a-icon-star-small .a-icon-alt",
+    "description": "Rating text like '4.5 out of 5 stars'",
+    "last_verified": "2026-03-14"
+  },
+  "result_url": {
+    "css": "h2 a",
+    "xpath": "//h2/a/@href",
+    "description": "Product detail page URL",
+    "last_verified": "2026-03-14"
+  },
+  "result_image": {
+    "css": ".s-image",
+    "description": "Product thumbnail image",
+    "last_verified": "2026-03-14"
+  },
+  "add_to_cart_button": {
+    "css": "#add-to-cart-button",
+    "description": "Add to Cart button on product detail page",
+    "last_verified": "2026-03-14"
+  },
+  "buy_now_button": {
+    "css": "#buy-now-button",
+    "description": "Buy Now button on product detail page",
+    "last_verified": "2026-03-14"
+  },
+  "cart_count": {
+    "css": "#nav-cart-count",
+    "description": "Cart item count in navigation bar",
+    "last_verified": "2026-03-14"
+  },
+  "cart_items": {
+    "css": ".sc-list-item",
+    "description": "Each item in the cart page",
+    "last_verified": "2026-03-14"
+  },
+  "cart_subtotal": {
+    "css": "#sc-subtotal-amount-activecart .sc-price",
+    "description": "Cart subtotal price",
+    "last_verified": "2026-03-14"
+  },
+  "checkout_button": {
+    "css": "#sc-buy-box-ptc-button input",
+    "description": "Proceed to checkout button on cart page",
+    "last_verified": "2026-03-14"
+  },
+  "product_title": {
+    "css": "#productTitle",
+    "description": "Product title on detail page",
+    "last_verified": "2026-03-14"
+  },
+  "product_price": {
+    "css": ".a-price .a-offscreen",
+    "description": "Product price on detail page",
+    "last_verified": "2026-03-14"
+  },
+  "product_availability": {
+    "css": "#availability span",
+    "description": "Stock availability text on detail page",
+    "last_verified": "2026-03-14"
+  }
+}

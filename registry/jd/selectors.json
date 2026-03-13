@@ -1,0 +1,58 @@
+{
+  "search_result_item": {
+    "css": ".gl-item",
+    "description": "Each product card in JD search results",
+    "last_verified": "2026-03-14"
+  },
+  "result_title": {
+    "css": ".p-name a em",
+    "description": "Product title in search result",
+    "last_verified": "2026-03-14"
+  },
+  "result_price": {
+    "css": ".p-price strong i",
+    "description": "Product price number",
+    "last_verified": "2026-03-14"
+  },
+  "result_url": {
+    "css": ".p-name a",
+    "xpath": "//div[@class='p-name']/a/@href",
+    "description": "Product detail page URL",
+    "last_verified": "2026-03-14"
+  },
+  "result_image": {
+    "css": ".p-img a img",
+    "description": "Product thumbnail image",
+    "last_verified": "2026-03-14"
+  },
+  "add_to_cart_button": {
+    "css": "#InitCartUrl",
+    "description": "Add to Cart button on product detail page",
+    "last_verified": "2026-03-14"
+  },
+  "product_title": {
+    "css": ".sku-name",
+    "description": "Product title on detail page",
+    "last_verified": "2026-03-14"
+  },
+  "product_price": {
+    "css": ".p-price .price",
+    "description": "Product price on detail page",
+    "last_verified": "2026-03-14"
+  },
+  "cart_items": {
+    "css": ".item-form",
+    "description": "Each item in the cart page",
+    "last_verified": "2026-03-14"
+  },
+  "cart_total": {
+    "css": "#sumPayPriceId",
+    "description": "Cart total price",
+    "last_verified": "2026-03-14"
+  },
+  "checkout_button": {
+    "css": "#order_submit",
+    "description": "Proceed to checkout button",
+    "last_verified": "2026-03-14"
+  }
+}

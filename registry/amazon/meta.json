@@ -1,0 +1,8 @@
+{
+  "plugin": "amazon",
+  "selector_version": 1,
+  "updated_at": "2026-03-14T00:00:00Z",
+  "selector_count": 15,
+  "supported_regions": ["us", "jp", "uk", "de", "ca"],
+  "notes": "Initial selector set for Amazon search, product detail, and cart pages"
+}

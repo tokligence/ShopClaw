@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "updated_at": "2026-03-14T00:00:00Z",
+  "plugins": {
+    "amazon": {
+      "selector_version": 1,
+      "plugin_version": "0.1.0",
+      "has_wasm": false
+    },
+    "jd": {
+      "selector_version": 1,
+      "plugin_version": "0.1.0",
+      "has_wasm": false
+    },
+    "taobao": {
+      "selector_version": 1,
+      "plugin_version": "0.1.0",
+      "has_wasm": false
+    }
+  }
+}
