@@ -4,7 +4,9 @@
 
 ShopClaw is a **local-first AI shopping assistant** that exposes shopping site operations as MCP (Model Context Protocol) tools. AI Agents discover and invoke these tools to search products, compare prices, and manage carts — all within the user's own browser.
 
-**Language**: Rust (core + plugins), TypeScript (Chrome extension only)
+**Language**: Rust (core + plugins)
+
+**Browser Extension**: ShopClaw reuses the KleePay Browser Relay extension (repo: [Edmonds-LR/kleepay-browser-relay](https://github.com/Edmonds-LR/kleepay-browser-relay)), the same extension used by KleePay Signer.
 
 **Key constraints**:
 - No cloud backend, no telemetry, no credential storage
@@ -52,7 +54,8 @@ ShopClaw is a **local-first AI shopping assistant** that exposes shopping site o
 │   │  用户日常 Chrome                                           │     │
 │   │                                                           │     │
 │   │  ┌────────────────┐                                       │     │
-│   │  │ ShopClaw 扩展   │  chrome.debugger API                  │     │
+│   │  │ KleePay Browser  │  chrome.debugger API                  │     │
+│   │  │ Relay 扩展      │                                      │     │
 │   │  └───────┬────────┘                                       │     │
 │   │          │                                                │     │
 │   │  ┌──────┴──────┐ ┌────────────┐ ┌────────────┐          │     │
@@ -69,7 +72,7 @@ ShopClaw is a **local-first AI shopping assistant** that exposes shopping site o
 以 `amazon_search("AirPods")` 为例：
 
 ```
-Agent                ShopClaw Core              Plugin (WASM)         Chrome 扩展          Amazon Tab
+Agent                ShopClaw Core              Plugin (WASM)         KleePay 扩展         Amazon Tab
   │                      │                          │                     │                   │
   │ tools/call           │                          │                     │                   │
   │ "amazon_search"      │                          │                     │                   │
@@ -158,7 +161,8 @@ Agent                ShopClaw Core              Plugin (WASM)         Chrome 扩
 │  │  selector/            │  │  browser/                  │  │
 │  │  ┌────────────────┐  │  │  ┌──────────────────────┐  │  │
 │  │  │ resolver       │  │  │  │ relay.rs             │  │  │
-│  │  │ 三层解析       │  │  │  │ WebSocket → 扩展     │  │  │
+│  │  │ 三层解析       │  │  │  │ WebSocket → KleePay  │  │  │
+│  │  │ Browser Relay 扩展   │  │  │
 │  │  │ 缓存/远程/LLM │  │  │  └──────────────────────┘  │  │
 │  │  ├────────────────┤  │  │  ┌──────────────────────┐  │  │
 │  │  │ sync.rs        │  │  │  │ cdp.rs               │  │  │
@@ -231,7 +235,7 @@ Plugin 请求: selectors::get("search_result_item")
 GitHub Repo: tokligence/ShopClaw
 │
 ├── crates/                    # Rust 源码
-├── extension/                 # Chrome 扩展源码
+│                              # Chrome extension: see Edmonds-LR/kleepay-browser-relay
 ├── DESIGN.md
 │
 └── registry/                  # ◄── Selector + Plugin 更新源
@@ -326,7 +330,7 @@ Plugin 能做的:                     Plugin 不能做的:
                                     ✗ 访问用户凭据/Cookie
 ```
 
-### 2.7 Chrome 扩展交互
+### 2.7 KleePay Browser Relay 扩展交互
 
 ```
 ShopClaw Core                    Chrome Extension                User Chrome
@@ -534,14 +538,8 @@ ShopClaw/
 │       └── src/
 │           └── lib.rs
 │
-├── extension/                    # Chrome extension (TypeScript)
-│   ├── manifest.json             # Chrome MV3 manifest
-│   ├── src/
-│   │   ├── background.ts        # Service worker: WebSocket server + CDP relay
-│   │   ├── popup.ts             # Connection status + disconnect button
-│   │   └── content.ts           # (minimal) page-level hooks if needed
-│   ├── package.json
-│   └── tsconfig.json
+│                                 # Chrome extension lives in separate repo:
+│                                 # Edmonds-LR/kleepay-browser-relay
 │
 ├── registry/                     # Selector + Plugin 更新源 (in-repo)
 │   ├── manifest.json             # 全局版本清单
@@ -848,7 +846,8 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use std::path::PathBuf;
 
-/// Manages the WebSocket connection to the Chrome extension.
+/// Manages the WebSocket connection to the KleePay Browser Relay extension.
+/// ShopClaw reads relay-token and relay-port files written by the KleePay extension.
 pub struct RelayClient {
     ws: Option<WebSocketStream<MaybeTlsStream<TcpStream>>>,
     token: String,
@@ -867,8 +866,8 @@ impl RelayClient {
             .map_err(|_| BrowserError::NotConnected)
     }
 
-    /// Discover the extension's WebSocket port.
-    /// The extension writes its port to ~/.shopclaw/relay-port.
+    /// Discover the KleePay extension's WebSocket port.
+    /// The KleePay Browser Relay extension writes its port to ~/.shopclaw/relay-port.
     pub fn discover_port() -> Result<u16, BrowserError> {
         let path = dirs::home_dir()
             .unwrap_or_default()
@@ -880,7 +879,7 @@ impl RelayClient {
             .map_err(|_| BrowserError::NotConnected)
     }
 
-    /// Connect to the Chrome extension's WebSocket relay.
+    /// Connect to the KleePay Browser Relay extension's WebSocket relay.
     pub async fn connect() -> Result<Self, BrowserError> {
         let token = Self::load_token()?;
         let port = Self::discover_port()?;
@@ -2078,39 +2077,13 @@ enabled = true
 enabled = false
 ```
 
-## 9. Chrome Extension (MV3)
+## 9. Chrome Extension (KleePay Browser Relay)
 
-```
-extension/manifest.json:
-{
-  "manifest_version": 3,
-  "name": "ShopClaw Browser Relay",
-  "version": "0.1.0",
-  "description": "Connects ShopClaw to your browser for local AI shopping assistance",
-  "permissions": ["debugger", "tabs", "storage"],
-  "background": {
-    "service_worker": "background.js"
-  },
-  "action": {
-    "default_popup": "popup.html",
-    "default_icon": "icon-48.png"
-  },
-  "icons": {
-    "48": "icon-48.png",
-    "128": "icon-128.png"
-  }
-}
-```
-
-The extension's service worker:
-1. Generates a random token on first install, writes it to a well-known file via `chrome.downloads` API or native messaging
-2. Starts a WebSocket server on a random localhost port, writes port to file
-3. Validates token on incoming connections
-4. Shows confirmation popup on first connection
-5. Relays CDP commands via `chrome.debugger.sendCommand()`
-6. Shows connection status in the extension popup (connected/disconnected, current operations)
-
-Token and port file exchange between extension and ShopClaw uses **Native Messaging** (Chrome's official mechanism for extensions to communicate with local applications). The extension declares a native messaging host, and ShopClaw registers itself as a native messaging host during `shopclaw setup`.
+> **The Chrome extension is maintained in a separate repo: [Edmonds-LR/kleepay-browser-relay](https://github.com/Edmonds-LR/kleepay-browser-relay).**
+>
+> ShopClaw does not ship its own extension. It connects to the KleePay Browser Relay extension the same way KleePay Signer does — by reading the `relay-token` and `relay-port` files that the extension writes, then opening a WebSocket connection authenticated with the token.
+>
+> The extension provides CDP relay via `chrome.debugger.sendCommand()`, token-based auth, and a user-facing connection status popup. See the kleepay-browser-relay repo for extension internals (manifest, service worker, native messaging setup).
 
 ## 10. Data Sanitization
 
@@ -2354,7 +2327,7 @@ pub fn execute(params: serde_json::Value) -> Result<serde_json::Value, String> {
 
 ### 15.2 问题 2：WASM 内异步操作无法工作
 
-**现状**：Browser Bridge 是 `async fn`，但 WASM 不原生支持 async。Plugin 调 `host_open_tab()` 时，宿主需要做异步网络操作（WebSocket → Chrome 扩展 → CDP），但 WASM 调用是同步阻塞的。
+**现状**：Browser Bridge 是 `async fn`，但 WASM 不原生支持 async。Plugin 调 `host_open_tab()` 时，宿主需要做异步网络操作（WebSocket → KleePay Browser Relay 扩展 → CDP），但 WASM 调用是同步阻塞的。
 
 **修正**：宿主在 host import 实现中使用 `block_on` 桥接。Wasmtime 的 host function 可以通过 `tokio::runtime::Handle::current().block_on()` 同步等待异步操作完成。Plugin 侧无需关心——它调用的是同步 API，阻塞等待结果返回。
 

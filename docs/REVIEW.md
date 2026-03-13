@@ -282,11 +282,11 @@ Fallback to TCP localhost for Windows (no Unix sockets).
 
 **Problem**: Any Chrome extension on the same machine can attempt to connect to ShopClaw's WebSocket (if it discovers the port/token).
 
-**Mitigation**: ShopClaw should validate the Chrome extension ID during handshake:
+**Mitigation**: ShopClaw should validate the KleePay Browser Relay extension ID during handshake:
 
 ```rust
-// During WebSocket handshake, extension sends its ID
-let expected_extension_id = "abcdefghijklmnopqrstuvwxyz123456";  // from Chrome Web Store
+// During WebSocket handshake, the KleePay extension sends its ID
+let expected_extension_id = "abcdefghijklmnopqrstuvwxyz123456";  // KleePay Browser Relay from Chrome Web Store
 if msg.extension_id != expected_extension_id {
     return Err(BrowserError::UnauthorizedExtension);
 }
@@ -314,17 +314,17 @@ if msg.extension_id != expected_extension_id {
 
 ### 4.2 [MEDIUM] Chrome-Only, No Firefox/Safari
 
-**Problem**: Chrome extension API (`chrome.debugger`) is Chrome-specific. Firefox uses different extension APIs, Safari has its own format entirely.
+**Problem**: The KleePay Browser Relay extension uses Chrome extension API (`chrome.debugger`), which is Chrome-specific. Firefox uses different extension APIs, Safari has its own format entirely.
 
 **Options**:
 
 | Approach | Pros | Cons |
 |----------|------|------|
-| Maintain separate extensions per browser | Best UX | 3x maintenance |
+| KleePay team maintains separate extensions per browser | Best UX | 3x maintenance (owned by KleePay, not ShopClaw) |
 | Use WebDriver/Playwright directly | Browser-agnostic | Requires debug port, conflicts with user |
 | Use Chrome-only, recommend Chrome | Simple | Excludes Firefox/Safari users |
 
-**Recommendation**: Chrome-only for v1. If demand exists, add Firefox support via separate extension in v2. Safari is low priority (small market share for power users).
+**Recommendation**: Chrome-only for v1 (dependent on KleePay Browser Relay extension support). If demand exists, Firefox support would need to be added to the KleePay extension first. Safari is low priority (small market share for power users).
 
 ### 4.3 [MEDIUM] MCP Protocol Stability
 
@@ -389,14 +389,14 @@ Add this to the Router's response serialization when needed, but don't block v1 
 | 9 | Currency conversion host function | 1.5 |
 | 10 | Checkout flow abstraction | 1.3 |
 | 11 | Coupon search tools | 1.4 |
-| 12 | Extension ID validation | 3.6 |
+| 12 | KleePay extension ID validation | 3.6 |
 
 ### Nice-to-Have (v2+)
 
 | # | Item | Section |
 |---|------|---------|
 | 13 | WIT layer split (shopping/booking/delivery) | 2.1 |
-| 14 | Firefox extension | 4.2 |
+| 14 | Firefox support in KleePay Browser Relay | 4.2 |
 | 15 | Mobile support architecture | 4.1 |
 | 16 | Multi-modal MCP responses | 4.5 |
 | 17 | Selector mirror URLs | 4.4 |

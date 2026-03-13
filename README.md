@@ -11,9 +11,9 @@ You: "Compare AirPods prices on Amazon and JD"
 
          ┌──────────────┐     MCP      ┌──────────────┐     CDP      ┌──────────────┐
          │   AI Agent   │ ──────────── │   ShopClaw   │ ──────────── │ Your Chrome  │
-         │  (OpenClaw,  │   stdio      │  (Rust, local│  extension   │  (your login │
-         │  Claude Code)│              │   process)   │  WebSocket   │   sessions)  │
-         └──────────────┘              └──────────────┘              └──────────────┘
+         │  (OpenClaw,  │   stdio      │  (Rust, local│  KleePay     │  (your login │
+         │  Claude Code)│              │   process)   │  Browser     │   sessions)  │
+         └──────────────┘              └──────────────┘  Relay ext.  └──────────────┘
 
 Agent: "Here's what I found:
         | Product      | Amazon  | JD     |
@@ -43,10 +43,13 @@ Agent: "Here's what I found:
 ## Quick Start
 
 ```bash
+# Prerequisites: install KleePay Browser Relay extension from Chrome Web Store
+# https://github.com/Edmonds-LR/kleepay-browser-relay
+
 # Install
 cargo install shopclaw
 
-# First-time setup (checks Chrome extension, creates config)
+# First-time setup (checks KleePay Browser Relay extension, creates config)
 shopclaw setup
 
 # Start as MCP server (AI Agent connects via stdio)
@@ -89,7 +92,7 @@ ShopClaw (Rust binary)
 │   ├── Rate Limiter        # Prevents triggering site anti-bot
 │   └── Audit Logger        # Logs all operations locally
 ├── Selector Resolver   # 3-layer: local cache → GitHub sync → LLM fallback
-├── Browser Bridge      # WebSocket → Chrome extension → CDP
+├── Browser Bridge      # WebSocket → KleePay Browser Relay extension → CDP
 └── Plugin Sandbox      # Wasmtime WASM runtime
     ├── Amazon Plugin (.wasm)
     ├── JD Plugin (.wasm)

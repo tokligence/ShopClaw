@@ -4,7 +4,9 @@
 
 ShopClaw is a local-first AI shopping assistant. It exposes shopping site operations as MCP tools so AI Agents can search, compare prices, and manage carts in the user's own browser.
 
-**Language**: Rust (core + plugins), TypeScript (Chrome extension)
+**Language**: Rust (core + plugins)
+
+**Browser Extension**: ShopClaw depends on the KleePay Browser Relay extension (repo: [Edmonds-LR/kleepay-browser-relay](https://github.com/Edmonds-LR/kleepay-browser-relay)). ShopClaw does not ship its own extension.
 
 ## Repository Structure
 
@@ -22,7 +24,6 @@ ShopClaw/
 │   ├── shopclaw-core/  # MCP host, plugin manager, browser bridge
 │   ├── shopclaw-plugin-sdk/  # Plugin SDK (compiled by plugins, not itself)
 │   └── shopclaw-plugin-*/    # Individual site plugins (compile to WASM)
-├── extension/          # Chrome extension (TypeScript, MV3)
 ├── README.md           # User-facing overview
 ├── CLAUDE.md           # This file
 └── .gitignore
@@ -33,7 +34,7 @@ ShopClaw/
 1. **Plugin sandbox = WASM (Wasmtime)** — not Deno. Plugins are Rust compiled to wasm32-wasi.
 2. **Plugin interface = WIT (Component Model)** — not raw `extern "C"` FFI. Type-safe, no unsafe code in plugins.
 3. **Selectors are decoupled from plugins** — stored in `registry/`, hot-updated from this repo via GitHub Raw. Plugins request selectors from the host at runtime.
-4. **Browser control via Chrome extension** — not `--remote-debugging-port`. Extension provides CDP relay over localhost WebSocket.
+4. **Browser control via KleePay Browser Relay extension** — not `--remote-debugging-port`. The KleePay extension (shared with KleePay Signer) provides CDP relay over localhost WebSocket.
 5. **No cloud backend** — everything runs locally. Selector sync uses GitHub Raw (no custom server).
 
 ## Development Conventions
